@@ -1,0 +1,1 @@
+# Identificador-de-areas-agricolas-em-imagens-de-satelites
