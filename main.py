@@ -3,62 +3,70 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 
-# Carregar a imagem (substitua pelo caminho da sua imagem de satélite)
-image = cv2.imread('imagem-teste.png')  ### coloque aqui o nome do arquivo da sua imagem
+# Carregar a imagem
+image = cv2.imread('imagem-teste.png')
 image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-# Redimensionar para facilitar o processamento
-image_resized = cv2.resize(image_rgb, (400, 400))
+# Dimensões da imagem original
+img_alt, img_larg, canais = image_rgb.shape
+tam_bloco = 400
+contador = 0
 
-# Converter a imagem para um vetor 2D de pixels (cada pixel é uma linha com suas 3 cores RGB)
-pixels = image_resized.reshape((-1, 3))
+# Imagens finais (vazias) para reconstrução
+imagem_reconstruida = np.zeros_like(image_rgb)
+segmentacao_global = np.zeros((img_alt, img_larg), dtype=np.uint8)
+mascara_global = np.zeros((img_alt, img_larg), dtype=np.uint8)
 
-# Aplicando o K-means para segmentação
-n_clusters = 4  # Vamos tentar 4 clusters para representar diferentes tipos de áreas
-kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-kmeans.fit(pixels)
+for y in range(0, img_alt, tam_bloco):
+    for x in range(0, img_larg, tam_bloco):
+        bloco = image_rgb[y:min(y+tam_bloco, img_alt), x:min(x+tam_bloco, img_larg)]
 
-# Prever os clusters para cada pixel
-segmented_image = kmeans.predict(pixels)
+        # Processamento
+        pixels = bloco.reshape((-1, 3))
+        kmeans = KMeans(n_clusters=4, random_state=42)
+        kmeans.fit(pixels)
+        segmented = kmeans.predict(pixels).reshape(bloco.shape[:2])
 
-# Reformatar a imagem segmentada para o formato original (resolução 400x400x3)
-segmented_image = segmented_image.reshape(image_resized.shape[:2])
+        # Cluster agrícola
+        cluster_centers = kmeans.cluster_centers_
+        green_range = np.array([30, 80, 30])
+        distances = np.linalg.norm(cluster_centers - green_range, axis=1)
+        agriculture_cluster = np.argmin(distances)
+        mask = (segmented == agriculture_cluster)
 
-# Visualizar a imagem segmentada
-plt.imshow(segmented_image, cmap='viridis')
-plt.title('Imagem Segmentada - K-means')
-plt.colorbar()
+        # Destacar área agrícola
+        highlighted = bloco.copy()
+        highlighted[~mask] = 0
+
+        # Coordenadas reais do bloco
+        altura_bloco, largura_bloco = highlighted.shape[:2]
+        imagem_reconstruida[y:y+altura_bloco, x:x+largura_bloco] = highlighted
+        segmentacao_global[y:y+altura_bloco, x:x+largura_bloco] = segmented
+        mascara_global[y:y+altura_bloco, x:x+largura_bloco] = (mask * 255).astype(np.uint8)
+
+        contador += 1
+
+print(f'{contador} blocos processados.')
+
+# Mostrar cada imagem em uma janela separada (uma por vez)
+
+# 1. Segmentação com colormap viridis
+plt.figure()
+plt.imshow(segmentacao_global, cmap='viridis')
+plt.title('Imagem Segmentada (K-means)')
+plt.axis('off')
 plt.show()
 
-# Examinando as cores médias de cada cluster para identificar qual corresponde à área agrícola
-cluster_centers = kmeans.cluster_centers_
-print("Centros dos clusters (cores médias):")
-for i, center in enumerate(cluster_centers):
-    print(f"Cluster {i}: {center}")
-
-# Identificando o cluster que mais provavelmente corresponde à área agrícola
-# Aqui estamos assumindo que o cluster com a cor média mais próxima de tons verdes (relacionados à agricultura) é o relevante
-agriculture_cluster = None
-green_range = np.array([30, 80, 30])  # A faixa de verde para detectar áreas agrícolas
-
-# Encontrar o cluster com cor mais próxima do verde (ajuste conforme necessário)
-distances = np.linalg.norm(cluster_centers - green_range, axis=1)
-agriculture_cluster = np.argmin(distances)
-
-print(f'O cluster que corresponde à área agrícola é: {agriculture_cluster}')
-
-# Criando a máscara para áreas agrícolas
-agriculture_mask = (segmented_image == agriculture_cluster)
-
-# Mostrar a máscara agrícola
-plt.imshow(agriculture_mask, cmap='gray')
-plt.title('Área Agrícola Identificada')
+# 2. Máscara em preto e branco
+plt.figure()
+plt.imshow(mascara_global, cmap='gray')
+plt.title('Máscara de Área Agrícola')
+plt.axis('off')
 plt.show()
 
-# Sobrepondo a máscara sobre a imagem original para uma visualização mais clara
-highlighted_image = image_resized.copy()
-highlighted_image[~agriculture_mask] = 0  # Apaga os pixels que não são agrícolas
-
-plt.imshow(highlighted_image)
-plt.title('Área Agrícola Sobreposta na Imagem Original')
+# 3. Imagem original com áreas agrícolas destacadas
+plt.figure()
+plt.imshow(imagem_reconstruida)
+plt.title('Áreas Agrícolas Destacadas')
+plt.axis('off')
 plt.show()
