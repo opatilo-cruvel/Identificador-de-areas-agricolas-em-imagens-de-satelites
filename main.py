@@ -1,92 +1,70 @@
 from mpi4py import MPI
-import cv2
-import numpy as np
-from sklearn.cluster import KMeans
+import os
+from processamento import processar_imagem
+import glob
+from time import time
+from concurrent.futures import ThreadPoolExecutor
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
-# Apenas o processo mestre carrega a imagem
+# Caminho das imagens
+pasta_imagens = "imgs"
+
+if not os.path.exists(pasta_imagens):
+    print(f"Erro: A pasta '{pasta_imagens}' não foi encontrada.")
+    exit(1)
+
+# Obter todos os arquivos .png
+arquivos = sorted(glob.glob(os.path.join(pasta_imagens, "*.png")))
+
+if len(arquivos) == 0:
+    print("Erro: Nenhuma imagem '.png' encontrada.")
+    exit(1)
+
+# Dividir imagens em blocos contíguos
+def dividir_blocos(lista, n_blocos):
+    tamanho = len(lista)
+    bloco = tamanho // n_blocos
+    resto = tamanho % n_blocos
+    return [lista[i*bloco + min(i, resto):(i+1)*bloco + min(i+1, resto)] for i in range(n_blocos)]
+
+imagens_divididas = dividir_blocos(arquivos, size)
+imagens_do_processo = imagens_divididas[rank]
+
+# Criar pasta para resultados deste processo
+resultados_pasta = f"resultados/rank_{rank}"
+os.makedirs(resultados_pasta, exist_ok=True)
+
+# Definir máximo de threads por processo (ajuste conforme CPU/memória)
+MAX_THREADS = 3
+
+inicio = time()
+
+def worker(caminho_img):
+    nome_arquivo = os.path.basename(caminho_img)
+    saida_path = os.path.join(resultados_pasta, nome_arquivo)
+    processar_imagem(caminho_img, saida_path)
+
+with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+    executor.map(worker, imagens_do_processo)
+
+fim = time()
+tempo_total = fim - inicio
+total_imgs = len(imagens_do_processo)
+
+# Enviar dados para o processo 0
+tempos = comm.gather(tempo_total, root=0)
+quantidades = comm.gather(total_imgs, root=0)
+
 if rank == 0:
-    image = cv2.imread('imagem-teste.png')
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    img_alt, img_larg, canais = image_rgb.shape
-else:
-    image_rgb = None
-    img_alt = img_larg = canais = 0
-
-# Broadcast das dimensões
-img_alt = comm.bcast(img_alt if rank == 0 else None, root=0)
-img_larg = comm.bcast(img_larg if rank == 0 else None, root=0)
-
-tam_bloco = 400
-blocos = []
-
-# O processo mestre cria a lista de blocos a serem processados
-if rank == 0:
-    for y in range(0, img_alt, tam_bloco):
-        for x in range(0, img_larg, tam_bloco):
-            blocos.append((y, x))
-
-# Divide os blocos entre os processos
-blocos_locais = np.array_split(blocos, size)[rank]
-
-resultados = []
-
-if rank == 0:
-    print(f"Iniciando com {size} processos MPI...")
-
-for y, x in blocos_locais:
-    bloco = image_rgb[y:min(y+tam_bloco, img_alt), x:min(x+tam_bloco, img_larg)]
-    pixels = bloco.reshape((-1, 3))
-    kmeans = KMeans(n_clusters=4, random_state=42, n_init='auto')
-    kmeans.fit(pixels)
-    segmented = kmeans.predict(pixels).reshape(bloco.shape[:2])
-
-    cluster_centers = kmeans.cluster_centers_
-    green_range = np.array([30, 80, 30])
-    distances = np.linalg.norm(cluster_centers - green_range, axis=1)
-    agriculture_cluster = np.argmin(distances)
-    mask = (segmented == agriculture_cluster)
-
-    highlighted = bloco.copy()
-    highlighted[~mask] = 0
-
-    resultados.append((y, x, highlighted, segmented, (mask * 255).astype(np.uint8)))
-
-# Recolher os resultados no processo 0
-todos_resultados = comm.gather(resultados, root=0)
-
-# Processo 0 reconstrói as imagens
-if rank == 0:
-    imagem_reconstruida = np.zeros_like(image_rgb)
-    segmentacao_global = np.zeros((img_alt, img_larg), dtype=np.uint8)
-    mascara_global = np.zeros((img_alt, img_larg), dtype=np.uint8)
-
-    for resultado_processo in todos_resultados:
-        for y, x, highlighted, segmented, mask in resultado_processo:
-            altura_bloco, largura_bloco = highlighted.shape[:2]
-            imagem_reconstruida[y:y+altura_bloco, x:x+largura_bloco] = highlighted
-            segmentacao_global[y:y+altura_bloco, x:x+largura_bloco] = segmented
-            mascara_global[y:y+altura_bloco, x:x+largura_bloco] = mask
-
-    import matplotlib.pyplot as plt
-
-    plt.figure()
-    plt.imshow(segmentacao_global, cmap='viridis')
-    plt.title('Imagem Segmentada (K-means)')
-    plt.axis('off')
-    plt.show()
-
-    plt.figure()
-    plt.imshow(mascara_global, cmap='gray')
-    plt.title('Máscara de Área Agrícola')
-    plt.axis('off')
-    plt.show()
-
-    plt.figure()
-    plt.imshow(imagem_reconstruida)
-    plt.title('Áreas Agrícolas Destacadas')
-    plt.axis('off')
-    plt.show()
+    print("\n=== RESUMO DA EXECUÇÃO ===")
+    total_geral = 0
+    tempo_total_geral = 0
+    for i in range(size):
+        print(f"Rank {i}: {quantidades[i]} imagens em {tempos[i]:.2f} segundos")
+        total_geral += quantidades[i]
+        tempo_total_geral += tempos[i]
+    print(f"\nTotal: {total_geral} imagens processadas")
+    print(f"Tempo médio por imagem: {tempo_total_geral / total_geral:.4f} segundos\n")
